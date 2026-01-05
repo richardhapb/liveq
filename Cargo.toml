@@ -5,4 +5,8 @@ edition = "2024"
 
 [dependencies]
 anyhow = "1.0.100"
+biquad = "0.5.0"
 cpal = "0.17.1"
+hound = "3.5.1"
+ringbuf = "0.4.8"
+rustfft = "6.4.1"
