@@ -367,8 +367,8 @@ pub fn plot_frequency_response(eq: &ParametricEQ, fft_size: usize) {
             };
 
             // Create an ASCII bar. We center it around a "0dB" baseline.
-            // Adjust the multiplier (3.0) to make the bars longer or shorter.
-            let bar_len = ((db + 12.0) * 3.0).max(0.0) as usize;
+            // the multiplier (3.0) makes the bars longer or shorter.
+            let bar_len = ((db + 12.0) * 2.0).max(0.0) as usize;
             let bar = "=".repeat(bar_len);
 
             println!("{:>8.1} Hz | {:>6.2} dB |{}", freq, db, bar);
@@ -530,41 +530,48 @@ pub fn run_system_eq() -> Result<(), anyhow::Error> {
 #[cfg(target_os = "linux")]
 pub fn run_system_eq() -> Result<(), anyhow::Error> {
     let host = cpal::default_host();
+    let device = host.default_output_device().unwrap();
+    let config: StreamConfig = device.default_output_config()?.into();
 
-    // In PipeWire, the 'default' devices are usually virtual endpoints
-    let input_device = host.default_input_device().unwrap();
-    let output_device = host.default_output_device().unwrap();
-    let config: StreamConfig = output_device.default_output_config()?.into();
+    println!("Device: {}", device.description()?,);
 
-    let (mut producer, mut consumer) = ringbuf::HeapRb::<f32>::new(4096).split();
+    let (mut producer, mut consumer) = ringbuf::HeapRb::<f32>::new(16384).split();
     let eq = Arc::new(Mutex::new(ParametricEQ::new(config.sample_rate as f32)));
 
-    let input_stream = input_device.build_input_stream(
+    // Input Stream: This will show up as a node in PipeWire
+    let input_stream = device.build_input_stream(
         &config,
         move |data: &[f32], _| {
             producer.push_slice(data);
         },
-        |e| println!("{e}"),
+        |e| eprintln!("{e}"),
         None,
     )?;
 
-    let output_stream = output_device.build_output_stream(
+    let eq_cb = Arc::clone(&eq);
+    let output_stream = device.build_output_stream(
         &config,
         move |data: &mut [f32], _| {
-            let mut eq = eq.lock().unwrap();
+            let mut eq = eq_cb.lock().unwrap();
             for s in data {
+                // Apply EQ here ONCE
                 *s = eq.process(consumer.try_pop().unwrap_or(0.0));
             }
         },
-        |e| println!("{e}"),
+        |e| eprintln!("{e}"),
         None,
     )?;
 
     input_stream.play()?;
     output_stream.play()?;
 
+    // Keep alive and start CLI
+    let _handle = (input_stream, output_stream);
+
+    // Set a custom name for PipeWire so it's easy to link
+    println!("EQ Node is running. Use pw-link to route audio.");
+
     let controller = EQController::new(Arc::clone(&eq));
     controller.main_loop()?;
-
-    Ok()
+    Ok(())
 }
