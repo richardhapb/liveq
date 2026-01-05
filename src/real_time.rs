@@ -453,7 +453,8 @@ pub struct AudioHandle {
     pub output: Stream,
 }
 
-pub fn run_system_wide_eq() -> Result<(), anyhow::Error> {
+#[cfg(target_os = "macos")]
+pub fn run_system_eq() -> Result<(), anyhow::Error> {
     let host = cpal::default_host();
 
     // Find BlackHole for Input
@@ -524,4 +525,46 @@ pub fn run_system_wide_eq() -> Result<(), anyhow::Error> {
     controller.main_loop()?;
 
     Ok(())
+}
+
+#[cfg(target_os = "linux")]
+pub fn run_system_eq() -> Result<(), anyhow::Error> {
+    let host = cpal::default_host();
+
+    // In PipeWire, the 'default' devices are usually virtual endpoints
+    let input_device = host.default_input_device().unwrap();
+    let output_device = host.default_output_device().unwrap();
+    let config: StreamConfig = output_device.default_output_config()?.into();
+
+    let (mut producer, mut consumer) = ringbuf::HeapRb::<f32>::new(4096).split();
+    let eq = Arc::new(Mutex::new(ParametricEQ::new(config.sample_rate as f32)));
+
+    let input_stream = input_device.build_input_stream(
+        &config,
+        move |data: &[f32], _| {
+            producer.push_slice(data);
+        },
+        |e| println!("{e}"),
+        None,
+    )?;
+
+    let output_stream = output_device.build_output_stream(
+        &config,
+        move |data: &mut [f32], _| {
+            let mut eq = eq.lock().unwrap();
+            for s in data {
+                *s = eq.process(consumer.try_pop().unwrap_or(0.0));
+            }
+        },
+        |e| println!("{e}"),
+        None,
+    )?;
+
+    input_stream.play()?;
+    output_stream.play()?;
+
+    let controller = EQController::new(Arc::clone(&eq));
+    controller.main_loop()?;
+
+    Ok()
 }
