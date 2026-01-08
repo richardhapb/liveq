@@ -1,0 +1,25 @@
+<div id="band-{{ band.id }}" class="flex flex-col items-center gap-2">
+    <label for="band-{{ band.id }}" class="text-sm font-semibold text-gray-400">
+        {{ band.frequency }}
+    </label>
+    <input 
+        type="range" 
+        id="band-{{ band.id }}"
+        name="band-{{ band.id }}"
+        min="-12" 
+        max="12" 
+        value="{{ band.gain }}" 
+        step="1"
+        class="vertical w-8 h-48 cursor-pointer accent-cyan-500"
+        hx-post="/equalizer/update/{{ band.id }}"
+        hx-trigger="change"
+        hx-vals='js:{gain: event.target.value}'
+        hx-swap="outerHtml"
+        hx-target="#band-{{ band.id }}"
+        {# This line resets the dropdown to the first option (index 0) #}
+        hx-on:change="document.getElementById('preset').selectedIndex = 0"
+    >
+    <span class="font-semibold text-cyan-400 min-w-[50px] text-center text-sm">
+        {{ band.gain }} dB
+    </span>
+</div>

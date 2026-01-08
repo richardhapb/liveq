@@ -13,6 +13,11 @@
             -webkit-appearance: slider-vertical;
             appearance: slider-vertical;
         }
+
+        select:invalid,
+        select option[value=""] {
+            color: #9ca3af; /* Tailwind gray-400 */
+        }
     </style>
 </head>
 <body class="bg-gray-900 text-gray-100 min-h-screen p-6">
@@ -30,6 +35,7 @@
                 hx-post="/equalizer/reset"
                 hx-target=".bg-gray-800"
                 hx-swap="innerHTML"
+                hx-on:click="document.getElementById('preset').selectedIndex = 0"
                 class="bg-cyan-500 hover:bg-cyan-600 text-gray-900 font-semibold px-6 py-3 rounded-lg transition-colors"
             >
                 Reset
@@ -39,6 +45,7 @@
                 <label for="preset" class="font-semibold">Preset:</label>
                 <select 
                     id="preset"
+                    required
                     hx-post="/equalizer/preset"
                     hx-trigger="change"
                     hx-target=".bg-gray-800"
@@ -47,6 +54,7 @@
                     name="preset"
                     class="bg-gray-700 text-gray-100 border border-gray-600 rounded-lg px-4 py-2 cursor-pointer focus:outline-none focus:ring-2 focus:ring-cyan-500"
                 >
+                    <option value="" disabled selected>Presets...</option>
                     <option value="flat">Flat</option>
                     <option value="rock">Rock</option>
                     <option value="jazz">Jazz</option>

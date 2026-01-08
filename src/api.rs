@@ -8,7 +8,7 @@ use axum::{
 };
 use ringbuf::Arc;
 use serde::{Deserialize, Serialize};
-use std::sync::Mutex;
+use std::{sync::Mutex, time::Duration};
 use tera::{Context, Tera};
 use tower_http::services::ServeDir;
 use tower_http::trace::TraceLayer;
@@ -56,7 +56,7 @@ async fn index(State(state): State<AppState>) -> impl IntoResponse {
         Ok(html) => Html(html).into_response(),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
-            error!("Template error: {}", e),
+            error!(%e, "Template error"),
         )
             .into_response(),
     }
@@ -82,9 +82,19 @@ async fn update_band(
             "Updated band {} ({}) to {} dB",
             id, band.frequency, band.gain
         );
-        StatusCode::OK
+
+        let mut context = Context::new();
+        context.insert("band", band);
+
+        match state.tera.render("band.html", &context) {
+            Ok(html) => Html(html).into_response(),
+            Err(e) => {
+                error!(%e, "rendering equalizer");
+                (StatusCode::INTERNAL_SERVER_ERROR, format!("Error: {e}")).into_response()
+            }
+        }
     } else {
-        StatusCode::NOT_FOUND
+        StatusCode::NOT_FOUND.into_response()
     }
 }
 
@@ -101,7 +111,10 @@ async fn reset_equalizer(State(state): State<AppState>) -> impl IntoResponse {
 
     match state.tera.render("equalizer.html", &context) {
         Ok(html) => Html(html).into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, format!("Error: {}", e)).into_response(),
+        Err(e) => {
+            error!(%e, "reseting equalizer");
+            (StatusCode::INTERNAL_SERVER_ERROR, format!("Error: {e}")).into_response()
+        }
     }
 }
 
@@ -152,7 +165,22 @@ pub async fn serve() -> Result<(), anyhow::Error> {
         controller: Arc::new(EQController::new(Arc::clone(&handler.eq))),
     };
 
-    tokio::spawn(init_eq(handler));
+    tokio::spawn(async move {
+        let handler_ref = Arc::new(handler);
+        loop {
+            match init_eq(Arc::clone(&handler_ref)).await {
+                Ok(_) => {
+                    info!("Closing equalizer");
+                    break;
+                }
+                Err(e) => {
+                    let seconds = 10;
+                    error!(%e, "re-trying in {seconds} seconds");
+                    tokio::time::sleep(Duration::from_secs(seconds)).await;
+                }
+            }
+        }
+    });
 
     let app = Router::new()
         .route("/", get(index))
@@ -170,4 +198,3 @@ pub async fn serve() -> Result<(), anyhow::Error> {
 
     Ok(())
 }
-

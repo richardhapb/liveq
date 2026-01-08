@@ -552,7 +552,7 @@ pub fn run_system_eq() -> Result<AudioHandler, anyhow::Error> {
     })
 }
 
-pub async fn init_eq(handler: AudioHandler) -> Result<(), anyhow::Error> {
+pub async fn init_eq(handler: Arc<AudioHandler>) -> Result<(), anyhow::Error> {
     info!(
         "Input: {} | Output: {}",
         handler.input_device.description()?,
