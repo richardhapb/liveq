@@ -1,14 +1,20 @@
 #![allow(dead_code)]
+mod api;
 mod fft;
 mod real_time;
 
-use crate::fft::{analyze_audio, get_samples_and_rate};
-use crate::real_time::{run_realtime_eq, run_system_eq};
+use tracing_subscriber::EnvFilter;
 
-fn main() -> Result<(), anyhow::Error> {
-    run_system_eq()?;
-    let (samples, sample_rate) = get_samples_and_rate()?;
-    run_realtime_eq(samples, sample_rate)?;
-    analyze_audio()?;
-    Ok(())
+use crate::api::serve;
+
+#[tokio::main]
+async fn main() -> Result<(), anyhow::Error> {
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
+        )
+        .init();
+
+    tracing::info!("Initializing server");
+    serve().await
 }

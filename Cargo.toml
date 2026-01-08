@@ -5,8 +5,15 @@ edition = "2024"
 
 [dependencies]
 anyhow = "1.0.100"
+axum = "0.8.8"
 biquad = "0.5.0"
 cpal = "0.17.1"
 hound = "3.5.1"
 ringbuf = "0.4.8"
 rustfft = "6.4.1"
+serde = { version = "1.0.228", features = ["derive"] }
+tera = "1.20.1"
+tokio = { version = "1.49.0", features = ["rt-multi-thread"] }
+tower-http = { version = "0.6.8", features = ["fs", "trace"] }
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.22", features = ["env-filter"] }

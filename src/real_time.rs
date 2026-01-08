@@ -80,7 +80,7 @@
 //!
 use biquad::*;
 use cpal::{
-    Stream, StreamConfig,
+    Device, StreamConfig,
     traits::{DeviceTrait, HostTrait, StreamTrait},
 };
 use ringbuf::traits::{Consumer, Producer, Split};
@@ -88,7 +88,12 @@ use rustfft::{
     FftPlanner,
     num_complex::{Complex, ComplexFloat},
 };
-use std::sync::{Arc, Mutex};
+use std::{
+    sync::{Arc, Mutex},
+    time::Duration,
+};
+
+use tracing::{debug, error, info};
 
 /// A single EQ band using the Direct Form 2 Transposed (DF2T) structure.
 /// DF2T is preferred in audio because it is more numerically stable than DF1.
@@ -179,7 +184,7 @@ impl ParametricEQ {
     fn set_band_gain(&mut self, band_idx: usize, gain_db: f32) {
         if let Some(band) = self.bands.get_mut(band_idx) {
             let freq = band.frequency;
-            println!("Setting band {} ({} Hz) to {} dB", band_idx, freq, gain_db);
+            info!("Setting band {} ({} Hz) to {} dB", band_idx, freq, gain_db);
             band.update(self.sample_rate, freq, 1.0, gain_db);
         }
     }
@@ -224,7 +229,7 @@ pub fn run_realtime_eq(samples: Vec<f32>, wav_sample_rate: u32) -> Result<(), an
     let config = device.default_output_config()?;
     let device_sample_rate = config.sample_rate() as f32;
 
-    println!(
+    info!(
         "WAV rate: {}Hz | Device rate: {}Hz",
         wav_sample_rate, device_sample_rate
     );
@@ -279,7 +284,7 @@ pub fn run_realtime_eq(samples: Vec<f32>, wav_sample_rate: u32) -> Result<(), an
                 }
             }
         },
-        |err| eprintln!("Stream error: {}", err),
+        |err| error!("Stream error: {}", err),
         None,
     )?;
 
@@ -379,6 +384,7 @@ pub fn plot_frequency_response(eq: &ParametricEQ, fft_size: usize) {
 
 /// A controller used to modify EQ parameters from the main thread
 /// while the audio thread is actively processing.
+#[derive(Clone)]
 pub struct EQController {
     // We hold a clone of the Arc pointing to the EQ
     eq: Arc<Mutex<ParametricEQ>>,
@@ -397,12 +403,13 @@ impl EQController {
     /// the lock is granted, coefficients are recalculated, and the next
     /// audio buffer is processed with the new sound settings.
     pub fn update_band(&self, index: usize, gain: f32, q: f32) {
+        debug!(index, "Updating band");
         if let Ok(mut eq) = self.eq.lock() {
             let sr = eq.sample_rate;
             if let Some(band) = eq.bands.get_mut(index) {
                 let freq = band.frequency;
 
-                println!("Dynamic Update: Band {} -> {}dB, Q: {}", index, gain, q);
+                info!("Dynamic Update: Band {} -> {}dB, Q: {}", index, gain, q);
                 band.update(sr, freq, q, gain);
             }
         }
@@ -410,13 +417,14 @@ impl EQController {
 
     /// Resets all bands to 0dB (Unity Gain).
     pub fn reset_all(&self) {
+        debug!("Reseting audio");
         if let Ok(mut eq) = self.eq.lock() {
             let sr = eq.sample_rate;
             for band in eq.bands.iter_mut() {
                 let freq = band.frequency;
                 band.update(sr, freq, 1.0, 0.0);
             }
-            println!("EQ Reset to Flat.");
+            info!("EQ Reset to Flat.");
         }
     }
 
@@ -448,13 +456,17 @@ impl EQController {
 }
 
 /// A container to keep our background audio threads alive.
-pub struct AudioHandle {
-    pub input: Stream,
-    pub output: Stream,
+pub struct AudioHandler {
+    pub input_config: StreamConfig,
+    pub output_config: StreamConfig,
+    pub input_device: Device,
+    pub output_device: Device,
+    pub eq: Arc<Mutex<ParametricEQ>>,
 }
 
 #[cfg(target_os = "macos")]
-pub fn run_system_eq() -> Result<(), anyhow::Error> {
+pub async fn run_system_eq() -> Result<AudioHandler, anyhow::Error> {
+    info!("Connecting to the audio");
     let host = cpal::default_host();
 
     // Find BlackHole for Input
@@ -462,7 +474,7 @@ pub fn run_system_eq() -> Result<(), anyhow::Error> {
         .input_devices()?
         .find(|x| {
             x.description()
-                .map(|n| n.name().contains("BlackHole"))
+                .map(|n| n.name().contains("2ch"))
                 .unwrap_or(false)
         })
         .expect("BlackHole not found!");
@@ -481,54 +493,21 @@ pub fn run_system_eq() -> Result<(), anyhow::Error> {
     let input_config: StreamConfig = input_device.default_input_config()?.into();
     let output_config: StreamConfig = output_device.default_output_config()?.into();
 
-    println!(
-        "Input: {} | Output: {}",
-        input_device.description()?,
-        output_device.description()?
-    );
-
     let eq = Arc::new(Mutex::new(ParametricEQ::new(
         output_config.sample_rate as f32,
     )));
-    let ring_buffer = ringbuf::HeapRb::<f32>::new(8192); // Larger buffer for macOS safety
-    let (mut producer, mut consumer) = ring_buffer.split();
 
-    // Capture from BlackHole
-    let input_stream = input_device.build_input_stream(
-        &input_config,
-        move |data: &[f32], _| {
-            producer.push_slice(data);
-        },
-        |e| eprintln!("Input Error: {e}"),
-        None,
-    )?;
-
-    // Send to Speakers
-    let eq_cb = Arc::clone(&eq);
-    let output_stream = output_device.build_output_stream(
-        &output_config,
-        move |data: &mut [f32], _| {
-            let mut eq = eq_cb.lock().unwrap();
-            for sample_out in data.iter_mut() {
-                let input = consumer.try_pop().unwrap_or(0.0);
-                *sample_out = eq.process(input);
-            }
-        },
-        |e| eprintln!("Output Error: {e}"),
-        None,
-    )?;
-
-    input_stream.play()?;
-    output_stream.play()?;
-
-    let controller = EQController::new(Arc::clone(&eq));
-    controller.main_loop()?;
-
-    Ok(())
+    Ok(AudioHandler {
+        input_device,
+        output_device,
+        input_config,
+        output_config,
+        eq,
+    })
 }
 
 #[cfg(target_os = "linux")]
-pub fn run_system_eq() -> Result<(), anyhow::Error> {
+pub fn run_system_eq() -> Result<AudioHandler, anyhow::Error> {
     let host = cpal::default_host();
     let device = host.default_output_device().unwrap();
     let config: StreamConfig = device.default_output_config()?.into();
@@ -544,7 +523,7 @@ pub fn run_system_eq() -> Result<(), anyhow::Error> {
         move |data: &[f32], _| {
             producer.push_slice(data);
         },
-        |e| eprintln!("{e}"),
+        |e| error!("{e}"),
         None,
     )?;
 
@@ -558,20 +537,60 @@ pub fn run_system_eq() -> Result<(), anyhow::Error> {
                 *s = eq.process(consumer.try_pop().unwrap_or(0.0));
             }
         },
-        |e| eprintln!("{e}"),
+        |e| error!("{e}"),
+        None,
+    )?;
+
+    input_stream.play()?;
+    output_stream.play()?;
+    Ok(AudioHandler {
+        input_device,
+        output_device,
+        input_config,
+        output_config,
+        eq,
+    })
+}
+
+pub async fn init_eq(handler: AudioHandler) -> Result<(), anyhow::Error> {
+    info!(
+        "Input: {} | Output: {}",
+        handler.input_device.description()?,
+        handler.output_device.description()?
+    );
+
+    let ring_buffer = ringbuf::HeapRb::<f32>::new(8192); // Larger buffer for macOS safety
+    let (mut producer, mut consumer) = ring_buffer.split();
+
+    // Capture from BlackHole
+    let input_stream = handler.input_device.build_input_stream(
+        &handler.input_config,
+        move |data: &[f32], _| {
+            producer.push_slice(data);
+        },
+        |e| error!("Input Error: {e}"),
+        None,
+    )?;
+
+    // Send to Speakers
+    let eq_cb = Arc::clone(&handler.eq);
+    let output_stream = handler.output_device.build_output_stream(
+        &handler.output_config,
+        move |data: &mut [f32], _| {
+            let mut eq = eq_cb.lock().unwrap();
+            for sample_out in data.iter_mut() {
+                let input = consumer.try_pop().unwrap_or(0.0);
+                *sample_out = eq.process(input);
+            }
+        },
+        |e| error!("Output Error: {e}"),
         None,
     )?;
 
     input_stream.play()?;
     output_stream.play()?;
 
-    // Keep alive and start CLI
-    let _handle = (input_stream, output_stream);
+    tokio::time::sleep(Duration::MAX).await;
 
-    // Set a custom name for PipeWire so it's easy to link
-    println!("EQ Node is running. Use pw-link to route audio.");
-
-    let controller = EQController::new(Arc::clone(&eq));
-    controller.main_loop()?;
     Ok(())
 }
