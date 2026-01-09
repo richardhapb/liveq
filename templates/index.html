@@ -32,6 +32,7 @@
 
         <div class="flex justify-between items-center mt-6 gap-4 flex-wrap">
             <button 
+                id="reset-btn"
                 hx-post="/equalizer/reset"
                 hx-target=".bg-gray-800"
                 hx-swap="innerHTML"
@@ -53,12 +54,13 @@
                     hx-include="this"
                     hx-vals='js:{name: event.target.value}'
                     hx-swap="none"
+                    hx-on:change="document.getElementById('reset-btn').click()"
                     class="bg-gray-700 text-gray-100 border border-gray-600 rounded-lg px-4 py-2 cursor-pointer focus:outline-none focus:ring-2 focus:ring-cyan-500"
                 >
-                    <option value="" disabled selected>Device...</option>
+                        <option value="" disabled {% if not selected_device %}selected{% endif %}>Device...</option>
 
                     {% for device in devices %}
-                        <option value="{{ device.name }}">{{ device.name }}</option>
+                        <option value="{{ device.name }}" {% if selected_device == device.name %}selected{% endif %}>{{ device.name }}</option>
                     {% endfor %}
                 </select>
             </div>

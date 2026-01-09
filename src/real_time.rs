@@ -477,8 +477,6 @@ impl Debug for AudioHandler {
 
 #[cfg(target_os = "macos")]
 pub async fn run_system_eq(name: Option<&str>) -> Result<AudioHandler, anyhow::Error> {
-    use cpal::SampleRate;
-
     info!("Connecting to the audio");
     let host = cpal::default_host();
 

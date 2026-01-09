@@ -40,6 +40,7 @@ struct ActiveSession {
     controller: Arc<EQController>,
     eq_job: JoinHandle<()>,
     cancel_token: Arc<CancellationToken>,
+    selected_device: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -78,6 +79,10 @@ async fn index(State(state): State<AppState>) -> impl IntoResponse {
     context.insert("bands", &bands);
     context.insert("status", "");
     context.insert("devices", &state.devices);
+    context.insert(
+        "selected_device",
+        &state.session.lock().unwrap().selected_device,
+    );
 
     trace!(?context);
 
@@ -215,6 +220,7 @@ async fn select_device(
             controller,
             eq_job: new_job,
             cancel_token: new_cancel_token,
+            selected_device: Some(device.name.to_string()),
         };
     }
 
@@ -282,6 +288,7 @@ pub async fn serve() -> Result<(), anyhow::Error> {
         controller,
         eq_job,
         cancel_token,
+        selected_device: None,
     }));
 
     let state = AppState {
