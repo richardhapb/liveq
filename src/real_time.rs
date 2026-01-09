@@ -509,7 +509,10 @@ pub async fn run_system_eq(name: Option<&str>) -> Result<AudioHandler, anyhow::E
     let output_config_req = output_device.default_output_config()?;
     let target_sample_rate = output_config_req.sample_rate();
 
-    info!("Targeting output sample rate: {}Hz", target_sample_rate);
+    info!(
+        "Targeting output sample rate: {}kHz",
+        target_sample_rate / 1000
+    );
 
     // Find a matching input config on BlackHole
     let mut input_supported = input_device.supported_input_configs()?;
