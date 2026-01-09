@@ -158,13 +158,59 @@ async fn apply_preset(
     let preset_name = form.preset.as_str();
 
     let gains: Vec<f32> = match preset_name {
-        "rock" => vec![5.0, 3.0, -1.0, -2.0, -1.0, 1.0, 3.0, 4.0, 5.0, 5.0],
-        "jazz" => vec![4.0, 3.0, 1.0, 2.0, -1.0, -1.0, 0.0, 1.0, 3.0, 4.0],
-        "electronic" => vec![6.0, 5.0, 0.0, -2.0, -2.0, 0.0, 2.0, 4.0, 5.0, 6.0],
+        "rock" => vec![
+            5.0,  // ~31 Hz  -> sub-bass weight (kick / low-end impact)
+            3.0,  // ~63 Hz  -> bass punch
+            -1.0, // ~125 Hz -> reduce mud in guitars
+            -2.0, // ~250 Hz -> cut boxiness
+            -1.0, // ~500 Hz -> clean low-mids
+            1.0,  // ~1 kHz  -> mid presence (guitar/vocal body)
+            3.0,  // ~2 kHz  -> attack and clarity (guitars, snare)
+            4.0,  // ~4 kHz  -> edge and aggression
+            5.0,  // ~8 kHz  -> brightness
+            5.0,  // ~16 kHz -> air / excitement
+        ],
+        "jazz" => vec![
+            4.0,  // ~31 Hz  -> subtle low-end warmth (upright bass)
+            3.0,  // ~63 Hz  -> bass body
+            1.0,  // ~125 Hz -> natural low-mid fullness
+            2.0,  // ~250 Hz -> instrument body (piano, horns)
+            -1.0, // ~500 Hz -> reduce muddiness
+            -1.0, // ~1 kHz  -> soften forward mids
+            0.0,  // ~2 kHz  -> neutral presence
+            1.0,  // ~4 kHz  -> articulation without harshness
+            3.0,  // ~8 kHz  -> cymbal detail
+            4.0,  // ~16 kHz -> air and openness
+        ],
+
+        "electronic" => vec![
+            6.0,  // ~31 Hz  -> sub-bass power (808 / synth subs)
+            5.0,  // ~63 Hz  -> bass energy
+            0.0,  // ~125 Hz -> avoid low-end congestion
+            -2.0, // ~250 Hz -> remove mud
+            -2.0, // ~500 Hz -> hollow mids (space for synths)
+            0.0,  // ~1 kHz  -> neutral
+            2.0,  // ~2 kHz  -> transient clarity
+            4.0,  // ~4 kHz  -> sparkle and attack
+            5.0,  // ~8 kHz  -> brightness
+            6.0,  // ~16 kHz -> air / hype
+        ],
+        "vocal" => vec![
+            -6.0, // ~31 Hz  -> remove rumble
+            -4.0, // ~63 Hz  -> reduce boom
+            -2.0, // ~125 Hz -> clean low body
+            0.0,  // ~250 Hz -> neutral (avoid boxiness)
+            2.0,  // ~500 Hz -> clarity
+            4.0,  // ~1 kHz  -> intelligibility
+            5.0,  // ~2 kHz  -> presence
+            4.0,  // ~4 kHz  -> articulation
+            2.0,  // ~8 kHz  -> light sibilance lift
+            1.0,  // ~16 kHz -> air
+        ],
         _ => vec![0.0; 10], // flat
     };
 
-    info!(preset = preset_name, "Applying preset");
+    info!(preset = preset_name, "Applying");
 
     {
         let controller = &state.session.lock().unwrap().controller;
