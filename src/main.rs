@@ -1,4 +1,5 @@
 #![allow(dead_code)]
+#![feature(if_let_guard)]
 mod api;
 mod fft;
 mod real_time;

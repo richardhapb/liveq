@@ -107,16 +107,11 @@ async fn update_band(
 
     if let Some(band) = bands.get_mut(id) {
         band.gain = params.gain.clamp(-12.0, 12.0);
-        state
-            .session
-            .lock()
-            .unwrap()
-            .controller
-            .update_band(id, band.gain, 1.0);
-        info!(
-            "Updated band {} ({}) to {} dB",
-            id, band.frequency, band.gain
-        );
+        {
+            let controller = &state.session.lock().unwrap().controller;
+
+            update_band_eq(id, band.gain, controller);
+        }
 
         let mut context = Context::new();
         context.insert("band", band);
@@ -160,16 +155,23 @@ async fn apply_preset(
     Form(form): Form<PresetForm>,
 ) -> impl IntoResponse {
     let mut bands = state.bands.lock().unwrap();
+    let preset_name = form.preset.as_str();
 
-    let gains: Vec<f32> = match form.preset.as_str() {
+    let gains: Vec<f32> = match preset_name {
         "rock" => vec![5.0, 3.0, -1.0, -2.0, -1.0, 1.0, 3.0, 4.0, 5.0, 5.0],
         "jazz" => vec![4.0, 3.0, 1.0, 2.0, -1.0, -1.0, 0.0, 1.0, 3.0, 4.0],
         "electronic" => vec![6.0, 5.0, 0.0, -2.0, -2.0, 0.0, 2.0, 4.0, 5.0, 6.0],
         _ => vec![0.0; 10], // flat
     };
 
-    for (band, &gain) in bands.iter_mut().zip(gains.iter()) {
-        band.gain = gain;
+    info!(preset = preset_name, "Applying preset");
+
+    {
+        let controller = &state.session.lock().unwrap().controller;
+        for (band, &gain) in bands.iter_mut().zip(gains.iter()) {
+            band.gain = gain;
+            update_band_eq(band.id, band.gain, controller);
+        }
     }
 
     let mut context = Context::new();
@@ -225,6 +227,12 @@ async fn select_device(
     }
 
     StatusCode::OK.into_response()
+}
+
+/// Update a single band using the [`EQController`]
+fn update_band_eq(id: usize, gain: f32, controller: &EQController) {
+    controller.update_band(id, gain, 1.0);
+    info!("Updated band {} to {} dB", id, gain);
 }
 
 /// Iniitialize all the config of the EQ

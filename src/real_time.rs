@@ -549,39 +549,29 @@ pub async fn run_system_eq(name: Option<&str>) -> Result<AudioHandler, anyhow::E
 }
 
 #[cfg(target_os = "linux")]
-pub fn run_system_eq() -> Result<AudioHandler, anyhow::Error> {
+pub async fn run_system_eq(name: Option<&str>) -> Result<AudioHandler, anyhow::Error> {
     let host = cpal::default_host();
-    let device = host.default_output_device().unwrap();
-    let config: StreamConfig = device.default_output_config()?.into();
+    let input_device = host
+        .default_output_device()
+        .ok_or(anyhow::anyhow!("default device not found"))?;
+    let input_config: StreamConfig = input_device.default_output_config()?.into();
 
-    println!("Device: {}", device.description()?,);
+    info!("Input Device: {}", input_device.description()?,);
 
-    let (mut producer, mut consumer) = ringbuf::HeapRb::<f32>::new(16384).split();
-    let eq = Arc::new(Mutex::new(ParametricEQ::new(config.sample_rate as f32)));
+    let eq = Arc::new(Mutex::new(ParametricEQ::new(
+        input_config.sample_rate as f32,
+    )));
 
-    // Input Stream: This will show up as a node in PipeWire
-    let input_stream = device.build_input_stream(
-        &config,
-        move |data: &[f32], _| {
-            producer.push_slice(data);
-        },
-        |e| error!("{e}"),
-        None,
-    )?;
+    let output_device = match name {
+        Some(name) if let Ok(mut devices) = host.output_devices() => devices
+            .find(|d| d.description().ok().is_some_and(|d| d.name() == name))
+            .unwrap_or(input_device.clone()),
+        _ => input_device.clone(),
+    };
 
-    let eq_cb = Arc::clone(&eq);
-    let output_stream = device.build_output_stream(
-        &config,
-        move |data: &mut [f32], _| {
-            let mut eq = eq_cb.lock().unwrap();
-            for s in data {
-                // Apply EQ here ONCE
-                *s = eq.process(consumer.try_pop().unwrap_or(0.0));
-            }
-        },
-        |e| error!("{e}"),
-        None,
-    )?;
+    info!("Output device: {}", output_device.description()?,);
+
+    let output_config = output_device.default_output_config()?.into();
 
     Ok(AudioHandler {
         input_device,
