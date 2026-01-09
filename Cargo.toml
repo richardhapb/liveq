@@ -14,6 +14,7 @@ rustfft = "6.4.1"
 serde = { version = "1.0.228", features = ["derive"] }
 tera = "1.20.1"
 tokio = { version = "1.49.0", features = ["rt-multi-thread"] }
+tokio-util = { version = "0.7.18", features = ["rt"] }
 tower-http = { version = "0.6.8", features = ["fs", "trace"] }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.22", features = ["env-filter"] }

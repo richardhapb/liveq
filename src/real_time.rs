@@ -80,7 +80,7 @@
 //!
 use biquad::*;
 use cpal::{
-    Device, StreamConfig,
+    Device, Stream, StreamConfig,
     traits::{DeviceTrait, HostTrait, StreamTrait},
 };
 use ringbuf::traits::{Consumer, Producer, Split};
@@ -89,15 +89,15 @@ use rustfft::{
     num_complex::{Complex, ComplexFloat},
 };
 use std::{
+    fmt::Debug,
     sync::{Arc, Mutex},
-    time::Duration,
 };
 
 use tracing::{debug, error, info};
 
 /// A single EQ band using the Direct Form 2 Transposed (DF2T) structure.
 /// DF2T is preferred in audio because it is more numerically stable than DF1.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 struct ParametricBand {
     filter: DirectForm2Transposed<f32>,
     coeffs: Coefficients<f32>,
@@ -151,7 +151,7 @@ impl ParametricBand {
 
 /// A collection of filters arranged in series.
 /// The output of Band 1 is the input of Band 2.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct ParametricEQ {
     bands: Vec<ParametricBand>,
     sample_rate: f32,
@@ -384,7 +384,7 @@ pub fn plot_frequency_response(eq: &ParametricEQ, fft_size: usize) {
 
 /// A controller used to modify EQ parameters from the main thread
 /// while the audio thread is actively processing.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct EQController {
     // We hold a clone of the Arc pointing to the EQ
     eq: Arc<Mutex<ParametricEQ>>,
@@ -456,6 +456,7 @@ impl EQController {
 }
 
 /// A container to keep our background audio threads alive.
+#[derive(Clone)]
 pub struct AudioHandler {
     pub input_config: StreamConfig,
     pub output_config: StreamConfig,
@@ -464,8 +465,18 @@ pub struct AudioHandler {
     pub eq: Arc<Mutex<ParametricEQ>>,
 }
 
+impl Debug for AudioHandler {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AudioHandler")
+            .field("input_config", &self.input_config)
+            .field("output_config", &self.output_config)
+            .field("eq", &self.eq)
+            .finish()
+    }
+}
+
 #[cfg(target_os = "macos")]
-pub async fn run_system_eq() -> Result<AudioHandler, anyhow::Error> {
+pub async fn run_system_eq(name: Option<&str>) -> Result<AudioHandler, anyhow::Error> {
     info!("Connecting to the audio");
     let host = cpal::default_host();
 
@@ -479,16 +490,20 @@ pub async fn run_system_eq() -> Result<AudioHandler, anyhow::Error> {
         })
         .expect("BlackHole not found!");
 
-    // Find your Real Speakers for Output
-
-    let output_device = host
-        .output_devices()?
-        .find(|x| {
-            x.description()
-                .map(|n| n.name().contains("LG ULTRAFINE"))
-                .unwrap_or(false)
-        })
-        .expect("LG ULTRAFINE not found! Please install it to intercept system audio.");
+    // Find the device if the name is provided or use the default if not
+    let output_device = match name {
+        Some(name) => host
+            .output_devices()?
+            .find(|x| {
+                x.description()
+                    .map(|n| n.name().contains(name))
+                    .unwrap_or(false)
+            })
+            .ok_or(anyhow::anyhow!("{name} not found"))?,
+        None => host
+            .default_output_device()
+            .ok_or(anyhow::anyhow!("default device not found"))?,
+    };
 
     let input_config: StreamConfig = input_device.default_input_config()?.into();
     let output_config: StreamConfig = output_device.default_output_config()?.into();
@@ -541,8 +556,6 @@ pub fn run_system_eq() -> Result<AudioHandler, anyhow::Error> {
         None,
     )?;
 
-    input_stream.play()?;
-    output_stream.play()?;
     Ok(AudioHandler {
         input_device,
         output_device,
@@ -552,35 +565,52 @@ pub fn run_system_eq() -> Result<AudioHandler, anyhow::Error> {
     })
 }
 
-pub async fn init_eq(handler: Arc<AudioHandler>) -> Result<(), anyhow::Error> {
-    info!(
-        "Input: {} | Output: {}",
-        handler.input_device.description()?,
-        handler.output_device.description()?
-    );
+pub async fn get_ouput_device_names() -> Result<Vec<String>, anyhow::Error> {
+    let host = cpal::default_host();
+    let devices = host.output_devices()?;
 
-    let ring_buffer = ringbuf::HeapRb::<f32>::new(8192); // Larger buffer for macOS safety
+    Ok(devices
+        .filter_map(|d| Some(d.description().ok()?.name().to_string()))
+        .collect())
+}
+
+pub async fn init_eq(handler: Arc<AudioHandler>) -> Result<(Stream, Stream), anyhow::Error> {
+    // Increase buffer size or ensure it's a power of 2
+    // 16384 samples provides a larger safety net for OS scheduling jitter
+    let ring_buffer = ringbuf::HeapRb::<f32>::new(16384);
     let (mut producer, mut consumer) = ring_buffer.split();
 
-    // Capture from BlackHole
     let input_stream = handler.input_device.build_input_stream(
         &handler.input_config,
         move |data: &[f32], _| {
-            producer.push_slice(data);
+            // Push as much as possible
+            let _ = producer.push_slice(data);
         },
         |e| error!("Input Error: {e}"),
         None,
     )?;
 
-    // Send to Speakers
     let eq_cb = Arc::clone(&handler.eq);
     let output_stream = handler.output_device.build_output_stream(
         &handler.output_config,
         move |data: &mut [f32], _| {
-            let mut eq = eq_cb.lock().unwrap();
-            for sample_out in data.iter_mut() {
-                let input = consumer.try_pop().unwrap_or(0.0);
-                *sample_out = eq.process(input);
+            // Try to lock, but if it's contested, we might prefer
+            // to use the last known good coefficients rather than blocking.
+            if let Ok(mut eq) = eq_cb.try_lock() {
+                for sample_out in data.iter_mut() {
+                    if let Some(input) = consumer.try_pop() {
+                        *sample_out = eq.process(input);
+                    } else {
+                        // Buffer underrun: output is faster than input
+                        *sample_out = 0.0;
+                    }
+                }
+            } else {
+                // If the Mutex is locked by the Web UI,
+                // skip EQ processing for this buffer to avoid a hang
+                for sample_out in data.iter_mut() {
+                    *sample_out = consumer.try_pop().unwrap_or(0.0);
+                }
             }
         },
         |e| error!("Output Error: {e}"),
@@ -589,8 +619,5 @@ pub async fn init_eq(handler: Arc<AudioHandler>) -> Result<(), anyhow::Error> {
 
     input_stream.play()?;
     output_stream.play()?;
-
-    tokio::time::sleep(Duration::MAX).await;
-
-    Ok(())
+    Ok((input_stream, output_stream))
 }

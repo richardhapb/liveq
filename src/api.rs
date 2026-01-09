@@ -10,11 +10,15 @@ use ringbuf::Arc;
 use serde::{Deserialize, Serialize};
 use std::{sync::Mutex, time::Duration};
 use tera::{Context, Tera};
+use tokio::task::JoinHandle;
+use tokio_util::sync::CancellationToken;
 use tower_http::services::ServeDir;
 use tower_http::trace::TraceLayer;
 use tracing::{debug, error, info, trace};
 
-use crate::real_time::{EQController, init_eq, run_system_eq};
+use crate::real_time::{
+    AudioHandler, EQController, get_ouput_device_names, init_eq, run_system_eq,
+};
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 struct Band {
@@ -23,11 +27,34 @@ struct Band {
     gain: f32,
 }
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 struct AppState {
     tera: Tera,
     bands: Arc<Mutex<Vec<Band>>>,
+    devices: Vec<Device>,
+    session: Arc<Mutex<ActiveSession>>,
+}
+
+#[derive(Debug)]
+struct ActiveSession {
     controller: Arc<EQController>,
+    eq_job: JoinHandle<()>,
+    cancel_token: Arc<CancellationToken>,
+}
+
+#[derive(Debug, Deserialize)]
+struct UpdateGain {
+    gain: f32,
+}
+
+#[derive(Debug, Deserialize)]
+struct PresetForm {
+    preset: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct Device {
+    name: String,
 }
 
 fn init_bands() -> Vec<Band> {
@@ -46,9 +73,11 @@ fn init_bands() -> Vec<Band> {
 
 async fn index(State(state): State<AppState>) -> impl IntoResponse {
     let bands = state.bands.lock().unwrap().clone();
+
     let mut context = Context::new();
     context.insert("bands", &bands);
     context.insert("status", "");
+    context.insert("devices", &state.devices);
 
     trace!(?context);
 
@@ -62,11 +91,7 @@ async fn index(State(state): State<AppState>) -> impl IntoResponse {
     }
 }
 
-#[derive(Deserialize)]
-struct UpdateGain {
-    gain: f32,
-}
-
+/// Update the gain of the band
 async fn update_band(
     Path(id): Path<usize>,
     State(state): State<AppState>,
@@ -77,7 +102,12 @@ async fn update_band(
 
     if let Some(band) = bands.get_mut(id) {
         band.gain = params.gain.clamp(-12.0, 12.0);
-        state.controller.update_band(id, band.gain, 1.0);
+        state
+            .session
+            .lock()
+            .unwrap()
+            .controller
+            .update_band(id, band.gain, 1.0);
         info!(
             "Updated band {} ({}) to {} dB",
             id, band.frequency, band.gain
@@ -98,6 +128,7 @@ async fn update_band(
     }
 }
 
+/// Reset the equalizer to a flat mode
 async fn reset_equalizer(State(state): State<AppState>) -> impl IntoResponse {
     let mut bands = state.bands.lock().unwrap();
     *bands = init_bands();
@@ -105,7 +136,7 @@ async fn reset_equalizer(State(state): State<AppState>) -> impl IntoResponse {
     let mut context = Context::new();
     context.insert("bands", &*bands);
 
-    state.controller.reset_all();
+    state.session.lock().unwrap().controller.reset_all();
 
     trace!(?context);
 
@@ -118,11 +149,7 @@ async fn reset_equalizer(State(state): State<AppState>) -> impl IntoResponse {
     }
 }
 
-#[derive(Deserialize)]
-struct PresetForm {
-    preset: String,
-}
-
+/// Apply a selected preset
 async fn apply_preset(
     State(state): State<AppState>,
     Form(form): Form<PresetForm>,
@@ -149,6 +176,95 @@ async fn apply_preset(
     }
 }
 
+/// Change the audio device stopping the active device
+async fn select_device(
+    State(state): State<AppState>,
+    Form(device): Form<Device>,
+) -> impl IntoResponse {
+    debug!(?device, "selecting device");
+
+    // Initialize the new hardware
+    let (handler, controller) = match initialize_eq(Some(&device.name)).await {
+        Ok(res) => res,
+        Err(e) => return (StatusCode::BAD_REQUEST, format!("Init error: {e}")).into_response(),
+    };
+
+    let new_cancel_token = Arc::new(CancellationToken::new());
+    let new_job = match spawn_eq(handler, Arc::clone(&new_cancel_token)).await {
+        Ok(job) => job,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Spawn error: {e}"),
+            )
+                .into_response();
+        }
+    };
+
+    // Lock the session and swap them
+    {
+        let mut session = state.session.lock().unwrap();
+
+        // Cancel the old task
+        session.cancel_token.cancel();
+        // Abort the old handle to be sure
+        session.eq_job.abort();
+
+        // Update the global state with new values
+        *session = ActiveSession {
+            controller,
+            eq_job: new_job,
+            cancel_token: new_cancel_token,
+        };
+    }
+
+    StatusCode::OK.into_response()
+}
+
+/// Iniitialize all the config of the EQ
+async fn initialize_eq(
+    name: Option<&str>,
+) -> Result<(Arc<AudioHandler>, Arc<EQController>), anyhow::Error> {
+    let handler = Arc::new(run_system_eq(name).await?);
+    let controller = Arc::new(EQController::new(Arc::clone(&handler.eq)));
+
+    Ok((handler, controller))
+}
+
+/// Spawn a task that keeps the audio playing on the selected device
+async fn spawn_eq(
+    handler: Arc<AudioHandler>,
+    cancel_token: Arc<CancellationToken>,
+) -> Result<JoinHandle<()>, anyhow::Error> {
+    Ok(tokio::spawn(async move {
+        match init_eq(Arc::clone(&handler)).await {
+            Ok((input_stream, output_stream)) => {
+                debug!("EQ initialized, waiting for cancel trigger");
+                cancel_token.cancelled().await;
+
+                // Clean shutdown
+                drop(input_stream);
+                drop(output_stream);
+                info!("Streams stopped cleanly");
+            }
+            Err(e) => {
+                let seconds = 10;
+                error!(%e, "re-trying in {seconds} seconds");
+                tokio::time::sleep(Duration::from_secs(seconds)).await;
+            }
+        }
+    }))
+}
+
+/// Get a list of available output devices
+async fn get_output_devices() -> Result<Vec<Device>, anyhow::Error> {
+    let device_names: Vec<String> = get_ouput_device_names().await?;
+    Ok(device_names
+        .into_iter()
+        .map(|name| Device { name })
+        .collect())
+}
+
 pub async fn serve() -> Result<(), anyhow::Error> {
     let tera = match Tera::new("templates/**/*") {
         Ok(t) => t,
@@ -157,36 +273,30 @@ pub async fn serve() -> Result<(), anyhow::Error> {
 
     debug!(templates=?tera.get_template_names().collect::<Vec<_>>());
 
-    let handler = run_system_eq().await?;
+    let (handler, controller) = initialize_eq(None).await?;
+    let cancel_token = Arc::new(CancellationToken::new());
+    let eq_job = spawn_eq(handler, Arc::clone(&cancel_token)).await?;
+    let devices = get_output_devices().await?;
+
+    let session = Arc::new(Mutex::new(ActiveSession {
+        controller,
+        eq_job,
+        cancel_token,
+    }));
 
     let state = AppState {
         tera,
         bands: Arc::new(Mutex::new(init_bands())),
-        controller: Arc::new(EQController::new(Arc::clone(&handler.eq))),
+        devices,
+        session,
     };
-
-    tokio::spawn(async move {
-        let handler_ref = Arc::new(handler);
-        loop {
-            match init_eq(Arc::clone(&handler_ref)).await {
-                Ok(_) => {
-                    info!("Closing equalizer");
-                    break;
-                }
-                Err(e) => {
-                    let seconds = 10;
-                    error!(%e, "re-trying in {seconds} seconds");
-                    tokio::time::sleep(Duration::from_secs(seconds)).await;
-                }
-            }
-        }
-    });
 
     let app = Router::new()
         .route("/", get(index))
         .route("/equalizer/update/{id}", post(update_band))
         .route("/equalizer/reset", post(reset_equalizer))
         .route("/equalizer/preset", post(apply_preset))
+        .route("/device", post(select_device))
         .nest_service("/static", ServeDir::new("static"))
         .layer(TraceLayer::new_for_http())
         .with_state(state);
