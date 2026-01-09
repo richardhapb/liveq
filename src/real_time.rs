@@ -477,6 +477,8 @@ impl Debug for AudioHandler {
 
 #[cfg(target_os = "macos")]
 pub async fn run_system_eq(name: Option<&str>) -> Result<AudioHandler, anyhow::Error> {
+    use cpal::SampleRate;
+
     info!("Connecting to the audio");
     let host = cpal::default_host();
 
@@ -505,12 +507,36 @@ pub async fn run_system_eq(name: Option<&str>) -> Result<AudioHandler, anyhow::E
             .ok_or(anyhow::anyhow!("default device not found"))?,
     };
 
-    let input_config: StreamConfig = input_device.default_input_config()?.into();
-    let output_config: StreamConfig = output_device.default_output_config()?.into();
+    // Get the Output Device's default config first
+    let output_config_req = output_device.default_output_config()?;
+    let target_sample_rate = output_config_req.sample_rate();
 
-    let eq = Arc::new(Mutex::new(ParametricEQ::new(
-        output_config.sample_rate as f32,
-    )));
+    info!("Targeting output sample rate: {}Hz", target_sample_rate);
+
+    // Find a matching input config on BlackHole
+    let mut input_supported = input_device.supported_input_configs()?;
+    let input_config: StreamConfig = input_supported
+        .find(|c| {
+            c.min_sample_rate() <= target_sample_rate && c.max_sample_rate() >= target_sample_rate
+        })
+        .map(|c| c.with_sample_rate(target_sample_rate))
+        .ok_or_else(|| {
+            anyhow::anyhow!("BlackHole does not support the output rate of {target_sample_rate}Hz",)
+        })?
+        .into();
+
+    let output_config: StreamConfig = output_config_req.into();
+
+    // Double-check synchronization
+    if input_config.sample_rate != output_config.sample_rate {
+        anyhow::bail!(
+            "Clock Mismatch! Input: {}Hz, Output: {}Hz",
+            input_config.sample_rate,
+            output_config.sample_rate
+        );
+    }
+
+    let eq = Arc::new(Mutex::new(ParametricEQ::new(target_sample_rate as f32)));
 
     Ok(AudioHandler {
         input_device,
