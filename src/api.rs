@@ -225,7 +225,7 @@ async fn apply_preset(
 
     match state.tera.render("equalizer.html", &context) {
         Ok(html) => Html(html).into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, format!("Error: {}", e)).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, format!("Error: {e}")).into_response(),
     }
 }
 
@@ -273,6 +273,37 @@ async fn select_device(
     }
 
     StatusCode::OK.into_response()
+}
+
+async fn rescan(State(mut state): State<AppState>) -> impl IntoResponse {
+    debug!("re-scanning devices");
+
+    match get_output_devices().await {
+        Ok(devices) => state.devices = devices,
+        Err(e) => {
+            error!(%e);
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        }
+    };
+
+    let selected_device = state
+        .session
+        .lock()
+        .unwrap()
+        .selected_device
+        .as_ref()
+        .and_then(|sd| state.devices.iter().find(|d| d.name == *sd))
+        .as_ref()
+        .map(|sel_device| sel_device.name.clone());
+
+    let mut context = Context::new();
+    context.insert("devices", &state.devices);
+    context.insert("selected_device", &selected_device.unwrap_or("".into()));
+
+    match state.tera.render("devices.html", &context) {
+        Ok(html) => Html(html).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, format!("Error: {e}")).into_response(),
+    }
 }
 
 /// Update a single band using the [`EQController`]
@@ -328,7 +359,7 @@ async fn get_output_devices() -> Result<Vec<Device>, anyhow::Error> {
 pub async fn serve() -> Result<(), anyhow::Error> {
     let tera = match Tera::new("templates/**/*") {
         Ok(t) => t,
-        Err(e) => bail!("Tera parsing error: {}", e),
+        Err(e) => bail!("Tera parsing error: {e}"),
     };
 
     debug!(templates=?tera.get_template_names().collect::<Vec<_>>());
@@ -358,6 +389,7 @@ pub async fn serve() -> Result<(), anyhow::Error> {
         .route("/equalizer/reset", post(reset_equalizer))
         .route("/equalizer/preset", post(apply_preset))
         .route("/device", post(select_device))
+        .route("/rescan", post(rescan))
         .nest_service("/static", ServeDir::new("static"))
         .layer(TraceLayer::new_for_http())
         .with_state(state);

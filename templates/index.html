@@ -42,27 +42,8 @@
                 Reset
             </button>
 
-            <div class="flex items-center gap-3">
-                <label for="device" class="font-semibold">Device:</label>
-                <select 
-                    id="device"
-                    name="device"
-                    required
-                    hx-post="/device"
-                    hx-trigger="change"
-                    hx-target=".bg-gray-800"
-                    hx-include="this"
-                    hx-vals='js:{name: event.target.value}'
-                    hx-swap="none"
-                    hx-on:change="document.getElementById('reset-btn').click()"
-                    class="bg-gray-700 text-gray-100 border border-gray-600 rounded-lg px-4 py-2 cursor-pointer focus:outline-none focus:ring-2 focus:ring-cyan-500"
-                >
-                        <option value="" disabled {% if not selected_device %}selected{% endif %}>Device...</option>
-
-                    {% for device in devices %}
-                        <option value="{{ device.name }}" {% if selected_device == device.name %}selected{% endif %}>{{ device.name }}</option>
-                    {% endfor %}
-                </select>
+            <div id="devices" class="flex items-center gap-3">
+                {% include "devices.html" %}
             </div>
 
             
@@ -94,6 +75,18 @@
             <p>{{ status }}</p>
         </div>
         {% endif %}
+        <div class="my-2 flex justify-center">
+            <button
+                id="reset-btn"
+                hx-post="/rescan"
+                hx-swap="innerHtml"
+                hx-target="#devices"
+                class="bg-cyan-200 hover:bg-cyan-600 text-gray-900 font-semibold px-6 py-3 rounded-lg transition-colors"
+            >
+                Re-Scan
+            </button>
+        </div>
+
     </main>
 </body>
 </html>
